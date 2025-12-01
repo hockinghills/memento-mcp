@@ -650,6 +650,399 @@ export async function handleCallToolRequest(
           };
         }
 
+      case 'find_entities_without_embeddings':
+        try {
+          const limit = args.limit ? Math.floor(Number(args.limit)) : 100;
+
+          if (
+            knowledgeGraphManager.storageProvider &&
+            typeof (knowledgeGraphManager.storageProvider as Record<string, unknown>)
+              .findEntitiesWithoutEmbeddings === 'function'
+          ) {
+            const result = await (
+              knowledgeGraphManager.storageProvider as Record<
+                string,
+                (limit: number) => Promise<unknown>
+              >
+            ).findEntitiesWithoutEmbeddings(limit);
+
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(result, null, 2),
+                },
+              ],
+            };
+          } else {
+            return {
+              content: [
+                {
+                  type: 'text',
+                  text: JSON.stringify(
+                    {
+                      error: 'Method not available',
+                      storageType: knowledgeGraphManager.storageProvider
+                        ? knowledgeGraphManager.storageProvider.constructor.name
+                        : 'unknown',
+                    },
+                    null,
+                    2
+                  ),
+                },
+              ],
+            };
+          }
+        } catch (error: Error | unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: `Error finding entities without embeddings: ${errorMessage}`,
+              },
+            ],
+          };
+        }
+
+      case 'force_generate_embedding_by_id':
+        // Validate arguments
+        if (!args.entity_id) {
+          throw new Error('Missing required parameter: entity_id');
+        }
+
+        process.stderr.write(
+          `[DEBUG] Force generating embedding for entity ID: ${args.entity_id}\n`
+        );
+
+        try {
+          // Check if the storage provider has the getEntityById method
+          if (
+            !knowledgeGraphManager.storageProvider ||
+            typeof knowledgeGraphManager.storageProvider.getEntityById !== 'function'
+          ) {
+            throw new Error('Storage provider does not support getEntityById method');
+          }
+
+          // Get the entity directly by ID
+          process.stderr.write(`[DEBUG] Looking up entity by ID: ${args.entity_id}\n`);
+          const entity = await knowledgeGraphManager.storageProvider.getEntityById(
+            String(args.entity_id)
+          );
+
+          if (!entity) {
+            process.stderr.write(`[ERROR] Entity not found with ID: ${args.entity_id}\n`);
+            throw new Error(`Entity not found with ID: ${args.entity_id}`);
+          }
+
+          process.stderr.write(
+            `[DEBUG] Found entity: ${entity.name} (ID: ${(entity as Record<string, unknown>).id})\n`
+          );
+
+          // Check if embedding service and job manager are available
+          if (!knowledgeGraphManager.embeddingJobManager) {
+            process.stderr.write(`[ERROR] EmbeddingJobManager not initialized\n`);
+            throw new Error('EmbeddingJobManager not initialized');
+          }
+
+          process.stderr.write(`[DEBUG] EmbeddingJobManager found, proceeding\n`);
+
+          // Prepare entity text for embedding
+          const embeddingText =
+            knowledgeGraphManager.embeddingJobManager._prepareEntityText(entity);
+          process.stderr.write(
+            `[DEBUG] Prepared entity text for embedding, length: ${embeddingText.length}\n`
+          );
+
+          // Generate embedding directly
+          const embeddingService = knowledgeGraphManager.embeddingJobManager.embeddingService;
+          if (!embeddingService) {
+            process.stderr.write(`[ERROR] Embedding service not available\n`);
+            throw new Error('Embedding service not available');
+          }
+
+          const vector = await embeddingService.generateEmbedding(embeddingText);
+          process.stderr.write(`[DEBUG] Generated embedding vector, length: ${vector.length}\n`);
+
+          // Store embedding
+          const embedding = {
+            vector,
+            model: embeddingService.getModelInfo().name,
+            lastUpdated: Date.now(),
+          };
+
+          // Store the embedding by entity ID (primary)
+          const entityId = (entity as Record<string, unknown>).id;
+          if (!entityId || typeof entityId !== 'string') {
+            throw new Error('Entity ID is invalid or missing');
+          }
+
+          process.stderr.write(`[DEBUG] Storing embedding for entity ID: ${entityId}\n`);
+          await knowledgeGraphManager.storageProvider.storeEntityVector(entityId, embedding);
+
+          // Also store by name for compatibility
+          process.stderr.write(`[DEBUG] Also storing embedding by name: ${entity.name}\n`);
+          try {
+            await knowledgeGraphManager.storageProvider.storeEntityVector(entity.name, embedding);
+          } catch (nameStoreError) {
+            process.stderr.write(
+              `[WARN] Failed to store embedding by name, but ID storage succeeded: ${nameStoreError}\n`
+            );
+          }
+
+          process.stderr.write(`[DEBUG] Successfully stored embedding for ${entity.name}\n`);
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    success: true,
+                    entity: entity.name,
+                    entity_id: entityId,
+                    vector_length: vector.length,
+                    model: embeddingService.getModelInfo().name,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } catch (error: any) {
+          process.stderr.write(`[ERROR] Failed to force generate embedding: ${error.message}\n`);
+          if (error.stack) {
+            process.stderr.write(`[ERROR] Stack trace: ${error.stack}\n`);
+          }
+          return {
+            content: [{ type: 'text', text: `Failed to generate embedding: ${error.message}` }],
+          };
+        }
+
+      case 'debug_entity_lookup':
+        // Validate arguments
+        if (!args.entity_id) {
+          throw new Error('Missing required parameter: entity_id');
+        }
+
+        try {
+          const entityId = String(args.entity_id);
+          process.stderr.write(`[DEBUG] Starting multi-query diagnostic for entity ID: ${entityId}\n`);
+
+          // Check if we have a Neo4j storage provider with connection manager access
+          if (
+            !knowledgeGraphManager.storageProvider ||
+            typeof (knowledgeGraphManager.storageProvider as Record<string, unknown>)
+              .getConnectionManager !== 'function'
+          ) {
+            throw new Error('This diagnostic requires Neo4j storage provider');
+          }
+
+          const connectionManager = (
+            knowledgeGraphManager.storageProvider as Record<string, () => unknown>
+          ).getConnectionManager();
+
+          // Run multiple diagnostic queries
+          const diagnosticResults: {
+            entity_id: string;
+            queries: Record<string, unknown>;
+          } = {
+            entity_id: entityId,
+            queries: {},
+          };
+
+          // Query 1: Try exact property match
+          try {
+            process.stderr.write(`[DEBUG] Query 1: Trying exact property match {id: $entityId}\n`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const result1 = await (connectionManager as any).executeQuery(
+              'MATCH (e:Entity {id: $entityId}) RETURN e, properties(e) as props',
+              { entityId }
+            );
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query1_exact_match: {
+                recordCount: result1.records.length,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                results: result1.records.map((r: any) => ({
+                  properties: r.get('props'),
+                })),
+              },
+            };
+          } catch (error: Error | unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query1_exact_match: { error: errorMessage },
+            };
+          }
+
+          // Query 2: Try WHERE clause instead
+          try {
+            process.stderr.write(`[DEBUG] Query 2: Trying WHERE clause\n`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const result2 = await (connectionManager as any).executeQuery(
+              'MATCH (e:Entity) WHERE e.id = $entityId RETURN e, properties(e) as props',
+              { entityId }
+            );
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query2_where_clause: {
+                recordCount: result2.records.length,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                results: result2.records.map((r: any) => ({
+                  properties: r.get('props'),
+                })),
+              },
+            };
+          } catch (error: Error | unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query2_where_clause: { error: errorMessage },
+            };
+          }
+
+          // Query 3: Sample 5 entity IDs that exist
+          try {
+            process.stderr.write(`[DEBUG] Query 3: Getting sample entity IDs\n`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const result3 = await (connectionManager as any).executeQuery(
+              'MATCH (e:Entity) WHERE e.id IS NOT NULL RETURN e.id as id, e.name as name LIMIT 5',
+              {}
+            );
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query3_sample_ids: {
+                recordCount: result3.records.length,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                results: result3.records.map((r: any) => ({
+                  id: r.get('id'),
+                  name: r.get('name'),
+                })),
+              },
+            };
+          } catch (error: Error | unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query3_sample_ids: { error: errorMessage },
+            };
+          }
+
+          // Query 4: Find entity by any node type
+          try {
+            process.stderr.write(`[DEBUG] Query 4: Searching across all node types\n`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const result4 = await (connectionManager as any).executeQuery(
+              'MATCH (e) WHERE e.id = $entityId RETURN labels(e) as labels, properties(e) as props',
+              { entityId }
+            );
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query4_any_node: {
+                recordCount: result4.records.length,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                results: result4.records.map((r: any) => ({
+                  labels: r.get('labels'),
+                  properties: r.get('props'),
+                })),
+              },
+            };
+          } catch (error: Error | unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query4_any_node: { error: errorMessage },
+            };
+          }
+
+          // Query 5: Check entities without embeddings that might match this ID
+          try {
+            process.stderr.write(`[DEBUG] Query 5: Checking entities without embeddings\n`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const result5 = await (connectionManager as any).executeQuery(
+              'MATCH (e:Entity) WHERE e.embedding IS NULL AND e.id = $entityId RETURN properties(e) as props',
+              { entityId }
+            );
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query5_no_embedding_match: {
+                recordCount: result5.records.length,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                results: result5.records.map((r: any) => ({
+                  properties: r.get('props'),
+                })),
+              },
+            };
+          } catch (error: Error | unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query5_no_embedding_match: { error: errorMessage },
+            };
+          }
+
+          // Query 6: Check all properties of entities without embeddings (sample)
+          try {
+            process.stderr.write(`[DEBUG] Query 6: Sampling entities without embeddings\n`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const result6 = await (connectionManager as any).executeQuery(
+              'MATCH (e:Entity) WHERE e.embedding IS NULL RETURN properties(e) as props LIMIT 3',
+              {}
+            );
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query6_no_embedding_sample: {
+                recordCount: result6.records.length,
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                results: result6.records.map((r: any) => ({
+                  properties: r.get('props'),
+                })),
+              },
+            };
+          } catch (error: Error | unknown) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            diagnosticResults.queries = {
+              ...diagnosticResults.queries,
+              query6_no_embedding_sample: { error: errorMessage },
+            };
+          }
+
+          process.stderr.write(`[DEBUG] Diagnostic queries complete\n`);
+
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(diagnosticResults, null, 2),
+              },
+            ],
+          };
+        } catch (error: Error | unknown) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          const errorStack = error instanceof Error ? error.stack : undefined;
+          process.stderr.write(`[ERROR] Error in debug_entity_lookup: ${errorMessage}\n`);
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    error: errorMessage,
+                    stack: errorStack,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
       default:
         throw new Error(`Unknown tool: ${name}`);
     }

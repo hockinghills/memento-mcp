@@ -1,6 +1,7 @@
 import type { EmbeddingService } from './EmbeddingService.js';
 import { DefaultEmbeddingService } from './DefaultEmbeddingService.js';
 import { OpenAIEmbeddingService } from './OpenAIEmbeddingService.js';
+import { VoyageAIEmbeddingService } from './VoyageAIEmbeddingService.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -103,7 +104,8 @@ export class EmbeddingServiceFactory {
     logger.debug('EmbeddingServiceFactory: Creating service from environment variables', {
       mockEmbeddings: useMockEmbeddings,
       openaiKeyPresent: !!process.env.OPENAI_API_KEY,
-      embeddingModel: process.env.OPENAI_EMBEDDING_MODEL || 'default',
+      voyageKeyPresent: !!process.env.VOYAGE_API_KEY,
+      embeddingProvider: process.env.EMBEDDING_PROVIDER || 'auto',
     });
 
     if (useMockEmbeddings) {
@@ -111,6 +113,42 @@ export class EmbeddingServiceFactory {
       return new DefaultEmbeddingService();
     }
 
+    // Check for explicit provider preference
+    const embeddingProvider = process.env.EMBEDDING_PROVIDER?.toLowerCase();
+
+    // Voyage AI provider
+    if (embeddingProvider === 'voyageai' || embeddingProvider === 'voyage') {
+      const voyageApiKey = process.env.VOYAGE_API_KEY;
+      const voyageModel = process.env.VOYAGE_EMBEDDING_MODEL || 'voyage-3-large';
+      const dimensions = process.env.NEO4J_VECTOR_DIMENSIONS
+        ? parseInt(process.env.NEO4J_VECTOR_DIMENSIONS, 10)
+        : undefined;
+
+      if (voyageApiKey) {
+        try {
+          logger.debug('EmbeddingServiceFactory: Creating Voyage AI embedding service', {
+            model: voyageModel,
+            dimensions,
+          });
+          const service = new VoyageAIEmbeddingService({
+            apiKey: voyageApiKey,
+            model: voyageModel,
+            dimensions,
+          });
+          logger.info('EmbeddingServiceFactory: Voyage AI embedding service created successfully', {
+            model: service.getModelInfo().name,
+            dimensions: service.getModelInfo().dimensions,
+          });
+          return service;
+        } catch (error) {
+          logger.error('EmbeddingServiceFactory: Failed to create Voyage AI service', error);
+          logger.info('EmbeddingServiceFactory: Falling back to default embedding service');
+          return new DefaultEmbeddingService();
+        }
+      }
+    }
+
+    // OpenAI provider (default behavior)
     const openaiApiKey = process.env.OPENAI_API_KEY;
     const embeddingModel = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
 
@@ -136,9 +174,39 @@ export class EmbeddingServiceFactory {
       }
     }
 
-    // No OpenAI API key, using default embedding service
+    // Check for Voyage AI as fallback
+    const voyageApiKey = process.env.VOYAGE_API_KEY;
+    if (voyageApiKey) {
+      try {
+        const voyageModel = process.env.VOYAGE_EMBEDDING_MODEL || 'voyage-3-large';
+        const dimensions = process.env.NEO4J_VECTOR_DIMENSIONS
+          ? parseInt(process.env.NEO4J_VECTOR_DIMENSIONS, 10)
+          : undefined;
+
+        logger.debug('EmbeddingServiceFactory: Creating Voyage AI embedding service (fallback)', {
+          model: voyageModel,
+          dimensions,
+        });
+        const service = new VoyageAIEmbeddingService({
+          apiKey: voyageApiKey,
+          model: voyageModel,
+          dimensions,
+        });
+        logger.info('EmbeddingServiceFactory: Voyage AI embedding service created successfully', {
+          model: service.getModelInfo().name,
+          dimensions: service.getModelInfo().dimensions,
+        });
+        return service;
+      } catch (error) {
+        logger.error('EmbeddingServiceFactory: Failed to create Voyage AI service', error);
+        logger.info('EmbeddingServiceFactory: Falling back to default embedding service');
+        return new DefaultEmbeddingService();
+      }
+    }
+
+    // No API keys found, using default embedding service
     logger.info(
-      'EmbeddingServiceFactory: No OpenAI API key found, using default embedding service'
+      'EmbeddingServiceFactory: No API keys found, using default embedding service'
     );
     return new DefaultEmbeddingService();
   }
@@ -185,6 +253,31 @@ EmbeddingServiceFactory.registerProvider('openai', (config = {}) => {
   }
 
   return new OpenAIEmbeddingService({
+    apiKey: config.apiKey,
+    model: config.model,
+    dimensions: config.dimensions,
+  });
+});
+
+EmbeddingServiceFactory.registerProvider('voyageai', (config = {}) => {
+  if (!config.apiKey) {
+    throw new Error('API key is required for Voyage AI embedding service');
+  }
+
+  return new VoyageAIEmbeddingService({
+    apiKey: config.apiKey,
+    model: config.model,
+    dimensions: config.dimensions,
+  });
+});
+
+// Alias for voyageai
+EmbeddingServiceFactory.registerProvider('voyage', (config = {}) => {
+  if (!config.apiKey) {
+    throw new Error('API key is required for Voyage AI embedding service');
+  }
+
+  return new VoyageAIEmbeddingService({
     apiKey: config.apiKey,
     model: config.model,
     dimensions: config.dimensions,

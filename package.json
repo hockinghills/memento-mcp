@@ -33,17 +33,22 @@
     "format": "prettier --write \"**/*.{ts,json,md}\"",
     "fix": "npm run lint:fix && npm run format",
     "neo4j:init": "tsx src/cli/neo4j-setup.ts init",
-    "neo4j:test": "tsx src/cli/neo4j-setup.ts test"
+    "neo4j:test": "tsx src/cli/neo4j-setup.ts test",
+    "embedding:analyze": "tsx src/cli/embedding-diagnostic.ts",
+    "embedding:migrate": "tsx src/cli/embedding-migration.ts",
+    "embedding:reindex": "tsx src/cli/embedding-reindex.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.11.0",
     "axios": "^1.8.4",
+    "cohere-ai": "^7.19.0",
     "dotenv": "^16.4.7",
     "lru-cache": "^11.1.0",
     "neo4j-driver": "^5.28.1",
     "openai": "^4.90.0",
     "ts-node": "^10.9.2",
-    "uuid": "^11.1.0"
+    "uuid": "^11.1.0",
+    "voyageai": "^0.0.8"
   },
   "devDependencies": {
     "@types/lru-cache": "^7.10.10",

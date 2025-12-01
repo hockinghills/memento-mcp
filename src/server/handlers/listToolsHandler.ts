@@ -524,6 +524,50 @@ export async function handleListToolsRequest(): Promise<{ tools: Array<Record<st
         },
       },
     },
+    {
+      name: 'find_entities_without_embeddings',
+      description:
+        'Find entities that are missing embeddings in your Memento MCP knowledge graph memory. Returns count and sample of entities without embeddings.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          limit: {
+            type: 'number',
+            description: 'Maximum number of sample entities to return (default: 100)',
+          },
+        },
+      },
+    },
+    {
+      name: 'force_generate_embedding_by_id',
+      description:
+        'Forcibly generate and store an embedding for a specific entity by its ID in your Memento MCP knowledge graph memory. Use this to target specific duplicate entities.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          entity_id: {
+            type: 'string',
+            description: 'ID of the entity to generate embedding for',
+          },
+        },
+        required: ['entity_id'],
+      },
+    },
+    {
+      name: 'debug_entity_lookup',
+      description:
+        'Run multiple diagnostic Neo4j queries to investigate why an entity ID exists in findEntitiesWithoutEmbeddings but cannot be retrieved via getEntityById. Directly queries the Neo4j database with various approaches to locate the entity.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          entity_id: {
+            type: 'string',
+            description: 'The entity ID to investigate (UUID format)',
+          },
+        },
+        required: ['entity_id'],
+      },
+    },
   ];
 
   // Return the list of tools with debug tools conditionally included

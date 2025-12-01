@@ -21,6 +21,8 @@ export interface VectorStore {
       filter?: Record<string, any>;
       hybridSearch?: boolean;
       minSimilarity?: number;
+      queryText?: string; // Required for hybrid search
+      rrfK?: number; // RRF constant for hybrid search
     }
   ): Promise<VectorSearchResult[]>;
 }

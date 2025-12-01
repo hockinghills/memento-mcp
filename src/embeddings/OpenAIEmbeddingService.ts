@@ -1,6 +1,7 @@
 import axios from 'axios';
 import { EmbeddingService, type EmbeddingModelInfo } from './EmbeddingService.js';
 import { logger } from '../utils/logger.js';
+import { getModelDimensions } from './config.js';
 
 /**
  * Configuration for OpenAI embedding service
@@ -76,8 +77,10 @@ export class OpenAIEmbeddingService extends EmbeddingService {
     }
 
     this.apiKey = config.apiKey || process.env.OPENAI_API_KEY || '';
-    this.model = config.model || 'text-embedding-3-small';
-    this.dimensions = config.dimensions || 1536; // text-embedding-3-small has 1536 dimensions
+    // Get model from config, env var, or default to text-embedding-3-small
+    this.model = config.model || process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+    // Automatically determine dimensions from model name unless explicitly overridden
+    this.dimensions = config.dimensions || getModelDimensions(this.model);
     this.version = config.version || '3.0.0';
     this.apiEndpoint = 'https://api.openai.com/v1/embeddings';
   }

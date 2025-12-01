@@ -1,16 +1,37 @@
 #!/usr/bin/env node
+import dotenv from 'dotenv';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
+
+// Load .env from the project root directory, not the current working directory
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+dotenv.config({ path: join(__dirname, '..', '.env') });
+
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { KnowledgeGraphManager } from './KnowledgeGraphManager.js';
 import { initializeStorageProvider } from './config/storage.js';
 import { setupServer } from './server/setup.js';
 import { EmbeddingJobManager } from './embeddings/EmbeddingJobManager.js';
 import { EmbeddingServiceFactory } from './embeddings/EmbeddingServiceFactory.js';
+import { EmbeddingConfigValidator } from './config/EmbeddingConfigValidator.js';
 import { logger } from './utils/logger.js';
 
 // Re-export the types and classes for use in other modules
 export * from './KnowledgeGraphManager.js';
 // Export the Relation type
 export { RelationMetadata, Relation } from './types/relation.js';
+
+// Validate embedding configuration at startup
+logger.info('=== Memento MCP Server Starting ===');
+logger.info('Validating embedding configuration...');
+const configValidation = EmbeddingConfigValidator.validateAndLog(false);
+
+// Warn if configuration has issues but don't block startup
+if (!configValidation.isValid) {
+  logger.warn('⚠️  Server starting with configuration errors. Some features may not work correctly.');
+  logger.warn('Run diagnostic tool for recommendations: npm run embedding:analyze');
+}
 
 // Initialize storage and create KnowledgeGraphManager
 const storageProvider = initializeStorageProvider();
@@ -93,20 +114,43 @@ try {
         lastUpdated: embedding.lastUpdated || Date.now(),
       };
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      if (typeof (storageProvider as any).updateEntityEmbedding === 'function') {
-        try {
-          logger.debug(`Neo4j adapter: Using updateEntityEmbedding for ${name}`);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          return await (storageProvider as any).updateEntityEmbedding(name, formattedEmbedding);
-        } catch (error) {
-          logger.error(`Neo4j adapter: Error in storeEntityVector for ${name}`, error);
-          throw error;
+      // Check if name looks like a UUID (entity ID)
+      const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name);
+
+      if (isUUID) {
+        // Use updateEntityEmbeddingById for entity IDs (including historical versions)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (typeof (storageProvider as any).updateEntityEmbeddingById === 'function') {
+          try {
+            logger.debug(`Neo4j adapter: Using updateEntityEmbeddingById for entity ID ${name}`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return await (storageProvider as any).updateEntityEmbeddingById(name, formattedEmbedding);
+          } catch (error) {
+            logger.error(`Neo4j adapter: Error in storeEntityVector for ID ${name}`, error);
+            throw error;
+          }
+        } else {
+          const errorMsg = `Neo4j adapter: updateEntityEmbeddingById not implemented`;
+          logger.error(errorMsg);
+          throw new Error(errorMsg);
         }
       } else {
-        const errorMsg = `Neo4j adapter: Neither storeEntityVector nor updateEntityEmbedding implemented for ${name}`;
-        logger.error(errorMsg);
-        throw new Error(errorMsg);
+        // Use updateEntityEmbedding for entity names (current versions only)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        if (typeof (storageProvider as any).updateEntityEmbedding === 'function') {
+          try {
+            logger.debug(`Neo4j adapter: Using updateEntityEmbedding for ${name}`);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            return await (storageProvider as any).updateEntityEmbedding(name, formattedEmbedding);
+          } catch (error) {
+            logger.error(`Neo4j adapter: Error in storeEntityVector for ${name}`, error);
+            throw error;
+          }
+        } else {
+          const errorMsg = `Neo4j adapter: Neither storeEntityVector nor updateEntityEmbedding implemented for ${name}`;
+          logger.error(errorMsg);
+          throw new Error(errorMsg);
+        }
       }
     },
   };
@@ -181,26 +225,55 @@ if (
       lastUpdated: embedding.lastUpdated || Date.now(),
     };
 
-    if (typeof knowledgeGraphManagerAny.storageProvider.updateEntityEmbedding === 'function') {
-      try {
-        logger.debug(
-          `Neo4j knowledgeGraphManager adapter: Using updateEntityEmbedding for ${name}`
-        );
-        return await knowledgeGraphManagerAny.storageProvider.updateEntityEmbedding(
-          name,
-          formattedEmbedding
-        );
-      } catch (error) {
-        logger.error(
-          `Neo4j knowledgeGraphManager adapter: Error in storeEntityVector for ${name}`,
-          error
-        );
-        throw error;
+    // Check if name looks like a UUID (entity ID)
+    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name);
+
+    if (isUUID) {
+      // Use updateEntityEmbeddingById for entity IDs (including historical versions)
+      if (typeof knowledgeGraphManagerAny.storageProvider.updateEntityEmbeddingById === 'function') {
+        try {
+          logger.debug(
+            `Neo4j knowledgeGraphManager adapter: Using updateEntityEmbeddingById for entity ID ${name}`
+          );
+          return await knowledgeGraphManagerAny.storageProvider.updateEntityEmbeddingById(
+            name,
+            formattedEmbedding
+          );
+        } catch (error) {
+          logger.error(
+            `Neo4j knowledgeGraphManager adapter: Error in storeEntityVector for ID ${name}`,
+            error
+          );
+          throw error;
+        }
+      } else {
+        const errorMsg = `Neo4j knowledgeGraphManager adapter: updateEntityEmbeddingById not implemented`;
+        logger.error(errorMsg);
+        throw new Error(errorMsg);
       }
     } else {
-      const errorMsg = `Neo4j knowledgeGraphManager adapter: updateEntityEmbedding not implemented for ${name}`;
-      logger.error(errorMsg);
-      throw new Error(errorMsg);
+      // Use updateEntityEmbedding for entity names (current versions only)
+      if (typeof knowledgeGraphManagerAny.storageProvider.updateEntityEmbedding === 'function') {
+        try {
+          logger.debug(
+            `Neo4j knowledgeGraphManager adapter: Using updateEntityEmbedding for ${name}`
+          );
+          return await knowledgeGraphManagerAny.storageProvider.updateEntityEmbedding(
+            name,
+            formattedEmbedding
+          );
+        } catch (error) {
+          logger.error(
+            `Neo4j knowledgeGraphManager adapter: Error in storeEntityVector for ${name}`,
+            error
+          );
+          throw error;
+        }
+      } else {
+        const errorMsg = `Neo4j knowledgeGraphManager adapter: updateEntityEmbedding not implemented for ${name}`;
+        logger.error(errorMsg);
+        throw new Error(errorMsg);
+      }
     }
   };
 

@@ -3,6 +3,47 @@
  */
 
 /**
+ * Mapping of OpenAI embedding model names to their vector dimensions
+ */
+export const OPENAI_MODEL_DIMENSIONS: Record<string, number> = {
+  'text-embedding-3-small': 1536,
+  'text-embedding-3-large': 3072,
+  'text-embedding-ada-002': 1536,
+};
+
+/**
+ * Mapping of Voyage AI embedding model names to their vector dimensions
+ * Note: voyage-3 models support configurable dimensions via output_dimension parameter
+ */
+export const VOYAGE_MODEL_DIMENSIONS: Record<string, number> = {
+  'voyage-3': 1024,
+  'voyage-3-large': 1024,
+  'voyage-3-lite': 512,
+  'voyage-finance-2': 1024,
+  'voyage-multilingual-2': 1024,
+  'voyage-law-2': 1024,
+  'voyage-code-2': 1536,
+  'voyage-2': 1024,
+  'voyage-large-2': 1536,
+  'voyage-large-2-instruct': 1024,
+};
+
+/**
+ * Get the vector dimensions for a given embedding model
+ * Supports both OpenAI and Voyage AI models
+ * @param modelName - Name of the embedding model
+ * @returns Number of dimensions for the model, or 1536 as default
+ */
+export function getModelDimensions(modelName: string): number {
+  // Check Voyage AI models first
+  if (modelName.startsWith('voyage-')) {
+    return VOYAGE_MODEL_DIMENSIONS[modelName] || 1024;
+  }
+  // Check OpenAI models
+  return OPENAI_MODEL_DIMENSIONS[modelName] || 1536;
+}
+
+/**
  * Default settings for embedding job processing
  */
 export const DEFAULT_EMBEDDING_SETTINGS = {

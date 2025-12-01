@@ -139,7 +139,7 @@ export class Neo4jStorageProvider implements StorageProvider {
     this.vectorStore = new Neo4jVectorStore({
       connectionManager: this.connectionManager,
       indexName: this.config.vectorIndexName,
-      dimensions: 1536,
+      dimensions: this.config.vectorDimensions, // Use dimensions from config (which reads from env)
       similarityFunction: 'cosine',
       entityNodeLabel: 'Entity',
     });
@@ -1310,6 +1310,40 @@ export class Neo4jStorageProvider implements StorageProvider {
   }
 
   /**
+   * Get an entity by its ID
+   * @param entityId ID of the entity to retrieve
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  async getEntityById(entityId: string): Promise<any | null> {
+    try {
+      // Query for entity by ID
+      // Note: We don't filter by validTo here because when looking up by ID,
+      // we want to find the specific entity regardless of its validity status.
+      // This is important for operations like force_generate_embedding_by_id
+      // which need to target specific entity versions.
+      const query = `
+        MATCH (e:Entity {id: $entityId})
+        RETURN e
+      `;
+
+      // Execute query
+      const result = await this.connectionManager.executeQuery(query, { entityId });
+
+      // Return null if no entity found
+      if (result.records.length === 0) {
+        return null;
+      }
+
+      // Convert node to entity
+      const node = result.records[0].get('e').properties;
+      return this.nodeToEntity(node);
+    } catch (error) {
+      logger.error(`Error retrieving entity by ID ${entityId} from Neo4j`, error);
+      throw error;
+    }
+  }
+
+  /**
    * Get a specific relation by its source, target, and type
    * @param from Source entity name
    * @param to Target entity name
@@ -1733,6 +1767,58 @@ export class Neo4jStorageProvider implements StorageProvider {
       }
     } catch (error) {
       logger.error(`Error updating embedding for entity ${entityName} in Neo4j`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Store or update the embedding vector for an entity by its ID (including historical versions)
+   * @param entityId The ID of the entity to update
+   * @param embedding The embedding data to store
+   */
+  async updateEntityEmbeddingById(entityId: string, embedding: EntityEmbedding): Promise<void> {
+    try {
+      // Verify that the entity exists (don't filter by validTo)
+      const entity = await this.getEntityById(entityId);
+      if (!entity) {
+        throw new Error(`Entity with ID ${entityId} not found`);
+      }
+
+      const session = await this.connectionManager.getSession();
+
+      try {
+        // Begin transaction
+        const txc = session.beginTransaction();
+
+        try {
+          // Update the entity with the embedding
+          // Note: We don't filter by validTo here because we want to update historical versions
+          const updateQuery = `
+            MATCH (e:Entity {id: $entityId})
+            SET e.embedding = $embedding,
+                e.updatedAt = $now
+            RETURN e
+          `;
+
+          await txc.run(updateQuery, {
+            entityId: entityId,
+            embedding: embedding.vector,
+            now: Date.now(),
+          });
+
+          // Commit transaction
+          await txc.commit();
+        } catch (error) {
+          // Rollback on error
+          await txc.rollback();
+          throw error;
+        }
+      } finally {
+        // Close session
+        await session.close();
+      }
+    } catch (error) {
+      logger.error(`Error updating embedding for entity ID ${entityId} in Neo4j`, error);
       throw error;
     }
   }
@@ -2234,6 +2320,38 @@ export class Neo4jStorageProvider implements StorageProvider {
     } catch (error) {
       logger.error('Error performing semantic search in Neo4j', error);
       throw error;
+    }
+  }
+
+  /**
+   * Find entities that are missing embeddings
+   */
+  async findEntitiesWithoutEmbeddings(limit = 100): Promise<Record<string, unknown>> {
+    try {
+      // First, make sure vector store is initialized
+      if (!this.vectorStore['initialized']) {
+        try {
+          await this.vectorStore.initialize();
+        } catch {
+          // Continue even if initialization fails
+        }
+      }
+
+      // Check if we can access the method
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (typeof (this.vectorStore as any).findEntitiesWithoutEmbeddings === 'function') {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return await (this.vectorStore as any).findEntitiesWithoutEmbeddings(limit);
+      } else {
+        return {
+          error: 'Method not available',
+          vectorStoreType: this.vectorStore.constructor.name,
+        };
+      }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      };
     }
   }
 

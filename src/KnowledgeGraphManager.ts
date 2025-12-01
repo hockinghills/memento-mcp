@@ -830,7 +830,7 @@ export class KnowledgeGraphManager {
    */
   async findSimilarEntities(
     query: string,
-    options: { limit?: number; threshold?: number } = {}
+    options: { limit?: number; threshold?: number; hybridSearch?: boolean } = {}
   ): Promise<Array<{ name: string; score: number }>> {
     if (!this.embeddingJobManager) {
       throw new Error('Embedding job manager is required for semantic search');
@@ -857,6 +857,8 @@ export class KnowledgeGraphManager {
         const results = await vectorStore.search(embedding, {
           limit,
           minSimilarity,
+          hybridSearch: options.hybridSearch,
+          queryText: options.hybridSearch ? query : undefined,
         });
 
         // Convert to the expected format
@@ -1000,6 +1002,7 @@ export class KnowledgeGraphManager {
     const similarEntities = await this.findSimilarEntities(query, {
       limit: options.limit || 10,
       threshold: options.threshold || 0.5,
+      hybridSearch: options.hybridSearch,
     });
 
     if (!similarEntities.length) {

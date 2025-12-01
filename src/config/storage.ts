@@ -1,6 +1,7 @@
 import { StorageProviderFactory } from '../storage/StorageProviderFactory.js';
 import type { VectorStoreFactoryOptions } from '../storage/VectorStoreFactory.js';
 import { logger } from '../utils/logger.js';
+import { getModelDimensions } from '../embeddings/config.js';
 
 /**
  * Determines the storage type based on the environment variable
@@ -57,7 +58,7 @@ export function createStorageConfig(storageType: string | undefined): StorageCon
       neo4jVectorIndexName: process.env.NEO4J_VECTOR_INDEX || 'entity_embeddings',
       neo4jVectorDimensions: process.env.NEO4J_VECTOR_DIMENSIONS
         ? parseInt(process.env.NEO4J_VECTOR_DIMENSIONS, 10)
-        : 1536,
+        : getModelDimensions(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'),
       neo4jSimilarityFunction:
         (process.env.NEO4J_SIMILARITY_FUNCTION as 'cosine' | 'euclidean') || 'cosine',
     },

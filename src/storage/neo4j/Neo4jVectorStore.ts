@@ -3,6 +3,7 @@ import type { Neo4jConnectionManager } from './Neo4jConnectionManager.js';
 import { Neo4jSchemaManager } from './Neo4jSchemaManager.js';
 import { logger } from '../../utils/logger.js';
 import neo4j from 'neo4j-driver';
+import { getModelDimensions } from '../../embeddings/config.js';
 
 export interface Neo4jVectorStoreOptions {
   connectionManager: Neo4jConnectionManager;
@@ -28,7 +29,12 @@ export class Neo4jVectorStore implements VectorStore {
   constructor(options: Neo4jVectorStoreOptions) {
     this.connectionManager = options.connectionManager;
     this.indexName = options.indexName || 'entity_embeddings';
-    this.dimensions = options.dimensions || 1536; // Default to OpenAI dimensions
+    // Get dimensions from options, NEO4J_VECTOR_DIMENSIONS env var, or infer from embedding model
+    this.dimensions =
+      options.dimensions ||
+      (process.env.NEO4J_VECTOR_DIMENSIONS
+        ? parseInt(process.env.NEO4J_VECTOR_DIMENSIONS, 10)
+        : getModelDimensions(process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'));
     this.similarityFunction = options.similarityFunction || 'cosine';
     this.entityNodeLabel = options.entityNodeLabel || 'Entity';
     this.schemaManager = new Neo4jSchemaManager(this.connectionManager);
@@ -185,6 +191,8 @@ export class Neo4jVectorStore implements VectorStore {
       filter?: Record<string, any>;
       hybridSearch?: boolean;
       minSimilarity?: number;
+      queryText?: string; // Required for hybrid search
+      rrfK?: number; // RRF constant (default 60)
     } = {}
   ): Promise<VectorSearchResult[]> {
     try {
@@ -214,6 +222,14 @@ export class Neo4jVectorStore implements VectorStore {
       // Process search options
       const limit = options.limit ?? 5;
       const minSimilarity = options.minSimilarity ?? 0;
+
+      // Check if hybrid search is enabled and query text is provided
+      if (options.hybridSearch && options.queryText) {
+        logger.debug(
+          `Neo4jVectorStore: Using hybrid search (RRF) with limit=${limit}, minSimilarity=${minSimilarity}`
+        );
+        return this.hybridSearchWithRRF(queryVector, options.queryText, limit, options.rrfK);
+      }
 
       logger.debug(
         `Neo4jVectorStore: Using vector search with limit=${limit}, minSimilarity=${minSimilarity}`
@@ -275,6 +291,143 @@ export class Neo4jVectorStore implements VectorStore {
         `Neo4jVectorStore: Search failed: ${error instanceof Error ? error.message : String(error)}`
       );
       return this.searchByPatternFallback(options.limit ?? 5);
+    }
+  }
+
+  /**
+   * Perform hybrid search combining vector similarity and BM25 keyword search using RRF
+   * @param queryVector The query embedding vector
+   * @param queryText The query text for keyword search
+   * @param limit Maximum number of results to return
+   * @param rrfK RRF constant (default 60)
+   * @returns Array of search results ranked by RRF score
+   */
+  private async hybridSearchWithRRF(
+    queryVector: number[],
+    queryText: string,
+    limit: number,
+    rrfK: number = 60
+  ): Promise<VectorSearchResult[]> {
+    const session = await this.connectionManager.getSession();
+
+    try {
+      // Step 1: Perform vector search
+      const vectorResults = await session.run(
+        `
+        CALL db.index.vector.queryNodes(
+          $indexName,
+          $limit,
+          $embedding
+        )
+        YIELD node, score
+        RETURN node.name AS id, node.entityType AS entityType, score AS vectorScore
+        ORDER BY score DESC
+      `,
+        {
+          indexName: this.indexName,
+          limit: neo4j.int(Math.floor(limit * 2)), // Get more candidates for RRF
+          embedding: queryVector,
+        }
+      );
+
+      logger.debug(`Neo4jVectorStore: Vector search returned ${vectorResults.records.length} results`);
+
+      // Step 2: Perform BM25 keyword search on entity names and observations
+      const keywordResults = await session.run(
+        `
+        MATCH (e:Entity)
+        WHERE e.name CONTAINS $queryText
+          OR ANY(obs IN e.observations WHERE obs CONTAINS $queryText)
+        WITH e,
+          CASE
+            WHEN e.name CONTAINS $queryText THEN 2.0
+            ELSE 1.0
+          END AS nameBoost,
+          size([obs IN e.observations WHERE obs CONTAINS $queryText]) AS obsMatches
+        WITH e, (nameBoost + (obsMatches * 0.5)) AS bm25Score
+        WHERE bm25Score > 0
+        RETURN e.name AS id, e.entityType AS entityType, bm25Score
+        ORDER BY bm25Score DESC
+        LIMIT $limit
+      `,
+        {
+          queryText,
+          limit: neo4j.int(Math.floor(limit * 2)),
+        }
+      );
+
+      logger.debug(`Neo4jVectorStore: Keyword search returned ${keywordResults.records.length} results`);
+
+      // Step 3: Apply Reciprocal Rank Fusion (RRF)
+      const rrfScores = new Map<string, { score: number; entityType: string; vectorScore?: number; bm25Score?: number }>();
+
+      // Add vector search results to RRF
+      vectorResults.records.forEach((record, index) => {
+        const id = record.get('id');
+        const entityType = record.get('entityType');
+        const vectorScore = record.get('vectorScore');
+        const rrfScore = 1 / (rrfK + index + 1);
+
+        rrfScores.set(id, {
+          score: rrfScore,
+          entityType,
+          vectorScore,
+        });
+      });
+
+      // Add keyword search results to RRF (combine with existing scores)
+      keywordResults.records.forEach((record, index) => {
+        const id = record.get('id');
+        const entityType = record.get('entityType');
+        const bm25Score = record.get('bm25Score');
+        const rrfScore = 1 / (rrfK + index + 1);
+
+        const existing = rrfScores.get(id);
+        if (existing) {
+          // Combine scores
+          rrfScores.set(id, {
+            score: existing.score + rrfScore,
+            entityType,
+            vectorScore: existing.vectorScore,
+            bm25Score,
+          });
+        } else {
+          // New entry
+          rrfScores.set(id, {
+            score: rrfScore,
+            entityType,
+            bm25Score,
+          });
+        }
+      });
+
+      // Step 4: Sort by RRF score and return top results
+      const sortedResults = Array.from(rrfScores.entries())
+        .sort((a, b) => b[1].score - a[1].score)
+        .slice(0, limit)
+        .map(([id, data]) => ({
+          id,
+          similarity: data.score,
+          metadata: {
+            entityType: data.entityType,
+            searchMethod: 'hybrid-rrf',
+            vectorScore: data.vectorScore,
+            bm25Score: data.bm25Score,
+            rrfScore: data.score,
+          },
+        }));
+
+      logger.debug(`Neo4jVectorStore: Hybrid RRF search returned ${sortedResults.length} results`);
+
+      return sortedResults;
+    } catch (error) {
+      logger.error(
+        `Neo4jVectorStore: Hybrid search failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+      // Fallback to regular vector search
+      return this.search(queryVector, { limit });
+    } finally {
+      await session.close();
     }
   }
 
@@ -378,6 +531,76 @@ export class Neo4jVectorStore implements VectorStore {
    * Diagnostic method to directly retrieve entity embedding info
    * Bypasses any application logic to query Neo4j directly
    */
+  /**
+   * Find entities that are missing embeddings
+   * Returns count and sample of entities without embeddings
+   */
+  async findEntitiesWithoutEmbeddings(limit = 100): Promise<{
+    totalEntities: number;
+    entitiesWithEmbeddings: number;
+    entitiesWithoutEmbeddings: number;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    samples: any[];
+  }> {
+    try {
+      const session = await this.connectionManager.getSession();
+
+      try {
+        // Count total entities
+        const totalQuery = `
+          MATCH (e:Entity)
+          RETURN count(e) as count
+        `;
+        const totalResult = await session.run(totalQuery);
+        const totalEntities = totalResult.records[0].get('count').toNumber();
+
+        // Count entities with embeddings
+        const withEmbeddingsQuery = `
+          MATCH (e:Entity)
+          WHERE e.embedding IS NOT NULL
+          RETURN count(e) as count
+        `;
+        const withEmbeddingsResult = await session.run(withEmbeddingsQuery);
+        const entitiesWithEmbeddings = withEmbeddingsResult.records[0].get('count').toNumber();
+
+        // Count entities without embeddings
+        const withoutEmbeddingsQuery = `
+          MATCH (e:Entity)
+          WHERE e.embedding IS NULL
+          RETURN count(e) as count
+        `;
+        const withoutEmbeddingsResult = await session.run(withoutEmbeddingsQuery);
+        const entitiesWithoutEmbeddings = withoutEmbeddingsResult.records[0].get('count').toNumber();
+
+        // Get sample of entities without embeddings
+        const sampleQuery = `
+          MATCH (e:Entity)
+          WHERE e.embedding IS NULL
+          RETURN e.name AS name, e.entityType AS entityType, e.id AS id
+          LIMIT $limit
+        `;
+        const sampleResult = await session.run(sampleQuery, { limit: neo4j.int(Math.floor(limit)) });
+        const samples = sampleResult.records.map((record) => ({
+          name: record.get('name'),
+          entityType: record.get('entityType'),
+          id: record.get('id'),
+        }));
+
+        return {
+          totalEntities,
+          entitiesWithEmbeddings,
+          entitiesWithoutEmbeddings,
+          samples,
+        };
+      } finally {
+        await session.close();
+      }
+    } catch (error) {
+      logger.error('Failed to find entities without embeddings', error);
+      throw error;
+    }
+  }
+
   async diagnosticGetEntityEmbeddings(): Promise<{
     count: number;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

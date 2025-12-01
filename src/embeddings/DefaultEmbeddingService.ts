@@ -1,6 +1,7 @@
 import { logger } from '../utils/logger.js';
 import { EmbeddingService, type EmbeddingModelInfo } from './EmbeddingService.js';
 import type { EmbeddingServiceConfig } from './EmbeddingServiceFactory.js';
+import { getModelDimensions } from './config.js';
 
 /**
  * Default embedding service implementation that generates random vectors.
@@ -20,7 +21,9 @@ export class DefaultEmbeddingService extends EmbeddingService {
    * @param modelVersion - Version to use for the model (legacy parameter)
    */
   constructor(
-    config: EmbeddingServiceConfig | number = 1536, // Default to OpenAI's dimensions for better test compatibility
+    config: EmbeddingServiceConfig | number = getModelDimensions(
+      process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small'
+    ), // Default to dimensions based on configured model
     modelName = 'memento-mcp-mock',
     modelVersion = '1.0.0'
   ) {
@@ -34,10 +37,12 @@ export class DefaultEmbeddingService extends EmbeddingService {
     } else {
       // For mock mode, default to OpenAI-compatible dimensions if not specified
       const isMockMode = process.env.MOCK_EMBEDDINGS === 'true';
-      const defaultDimensions = isMockMode ? 1536 : 384;
+      const embeddingModel = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-small';
+      const defaultDimensions = isMockMode ? getModelDimensions(embeddingModel) : 384;
 
       this.dimensions = config.dimensions || defaultDimensions;
-      this.modelName = config.model || (isMockMode ? 'text-embedding-3-small-mock' : modelName);
+      this.modelName =
+        config.model || (isMockMode ? `${embeddingModel}-mock` : modelName);
       this.modelVersion = config.version?.toString() || modelVersion;
     }
 
